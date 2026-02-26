@@ -1,25 +1,28 @@
 # KYB MCP — Architecture & Flow
 
-## Building Block View
+---
+
+## Agentic Model — Building Block View
 
 ```mermaid
 C4Container
-    title KYB MCP — Building Block View
+    title KYB MCP — Agentic Model Building Block View
 
     Person(customer, "Business Customer", "Applies for onboarding via the digital channel")
     Person(analyst, "KYB Analyst", "Reviews REFER and REJECT cases. Makes final manual decision.")
 
     System_Boundary(onboarding, "Digital Onboarding Platform") {
         Container(webApp, "Onboarding Web App", "Web Application", "Customer-facing channel. Collects business registration number and presents KYB outcome.")
-        Container(apiGateway, "KYB API Gateway", "Python / Flask", "Exposes POST /kyb/check. Authenticates requests and orchestrates the KYB process.")
-        Container(kybAgent, "KYB Agent", "Claude AI", "Reasons over KYB results. Interprets risk and routes to appropriate outcome.")
+        Container(apiGateway, "KYB API Gateway", "Python / Flask", "Exposes POST /kyb/check. Authenticates requests and hands off to KYB Agent.")
 
-        System_Boundary(mcpServer, "KYB MCP Server") {
-            Container(verifyBusiness, "Business Verification", "Python", "Verifies legal name, status, incorporation date and registered address.")
-            Container(getDirectors, "Directors & Ownership", "Python", "Retrieves active directors, PSC and UBO structure.")
-            Container(sanctionsCheck, "Sanctions Screening", "Python", "Screens business and directors against OFAC, UN, EU and HM Treasury lists.")
-            Container(riskScore, "Risk Scoring Engine", "Python", "Calculates a risk score and LOW / MEDIUM / HIGH rating from all KYB data.")
-            Container(decisionEngine, "Decision Engine", "Python", "Produces APPROVE / REFER / REJECT decision with next actions for human review.")
+        Container(kybAgent, "KYB Agent", "Claude AI — ReAct Loop", "Central intelligence. Autonomously reasons at each step, decides which tools to call, in what order, and when to stop early. Maintains context across all tool calls.")
+
+        System_Boundary(mcpServer, "KYB MCP Server — Tool Registry") {
+            Container(verifyBusiness, "verify_business", "Tool", "Verifies legal name, status, incorporation date and registered address.")
+            Container(getDirectors, "get_directors", "Tool", "Retrieves active directors, PSC and UBO structure.")
+            Container(sanctionsCheck, "screen_sanctions", "Tool", "Screens business and directors against OFAC, UN, EU and HM Treasury lists.")
+            Container(riskScore, "calculate_risk_score", "Tool", "Calculates risk score and LOW / MEDIUM / HIGH rating.")
+            Container(decisionEngine, "make_decision", "Tool", "Produces APPROVE / REFER / REJECT with next actions.")
         }
     }
 
@@ -29,16 +32,15 @@ C4Container
 
     Rel(customer, webApp, "Submits registration number", "HTTPS")
     Rel(analyst, apiGateway, "Reviews and actions REFER/REJECT cases", "HTTPS")
-
     Rel(webApp, apiGateway, "POST /kyb/check", "HTTPS / JSON")
     Rel(apiGateway, entraId, "Validates token", "OIDC")
-    Rel(apiGateway, kybAgent, "Triggers KYB check")
+    Rel(apiGateway, kybAgent, "Passes KYB request to agent", "Internal")
 
-    Rel(kybAgent, verifyBusiness, "Calls tool", "MCP")
-    Rel(kybAgent, getDirectors, "Calls tool", "MCP")
-    Rel(kybAgent, sanctionsCheck, "Calls tool", "MCP")
-    Rel(kybAgent, riskScore, "Calls tool", "MCP")
-    Rel(kybAgent, decisionEngine, "Calls tool", "MCP")
+    Rel(kybAgent, verifyBusiness, "Agent decides to call — always first", "MCP")
+    Rel(kybAgent, getDirectors, "Agent calls if business is active", "MCP")
+    Rel(kybAgent, sanctionsCheck, "Agent calls if directors retrieved", "MCP")
+    Rel(kybAgent, riskScore, "Agent calls if no critical sanctions hit", "MCP")
+    Rel(kybAgent, decisionEngine, "Agent calls to produce final decision", "MCP")
 
     Rel(verifyBusiness, companiesHouse, "GET /company/{reg}", "HTTPS")
     Rel(getDirectors, companiesHouse, "GET /company/{reg}/officers", "HTTPS")
@@ -47,86 +49,54 @@ C4Container
 
 ---
 
-## Text Architecture
+## Agentic ReAct Loop — How the Agent Thinks
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                  DIGITAL ONBOARDING CHANNEL                     │
-│            (Web App — Business Customer facing)                 │
-└────────────────────────────┬────────────────────────────────────┘
-                             │  ① Submits KYB request
-                             │  (registration number, business name)
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    KYB API GATEWAY                              │
-│              (Flask REST API — POST /kyb/check)                 │
-│         Accepts request, authenticates, triggers agent          │
-└────────────────────────────┬────────────────────────────────────┘
-                             │  ② Triggers KYB Agent
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      KYB AGENT (Claude)                         │
-│   Orchestrates the KYB flow, calls MCP tools in sequence,       │
-│   interprets results and determines referral path               │
-└────────────────────────────┬────────────────────────────────────┘
-                             │  ③ Calls run_full_kyb tool
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     KYB MCP SERVER                              │
-│                                                                 │
-│   ④ verify_business ──────► Companies House API (UK)            │
-│          │                  Returns: name, status, address      │
-│          ▼                                                      │
-│   ⑤ get_directors ────────► Companies House API (UK)            │
-│          │                  Returns: directors, PSC/UBO         │
-│          ▼                                                      │
-│   ⑥ screen_sanctions ─────► OFAC / UN / EU / HM Treasury       │
-│          │                  Returns: hits, clear flag           │
-│          ▼                                                      │
-│   ⑦ calculate_risk_score   (Internal scoring engine)            │
-│          │                  Returns: score, LOW/MEDIUM/HIGH     │
-│          ▼                                                      │
-│   ⑧ decision_engine        (Internal logic)                     │
-│                             Returns: APPROVE / REFER / REJECT   │
-└────────────────────────────┬────────────────────────────────────┘
-                             │  ⑨ Returns KYB decision + details
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      KYB AGENT (Claude)                         │
-│      Receives structured decision, formats response             │
-└──────────┬──────────────────────────────────────────┬──────────┘
-           │                                          │
-    ⑩ APPROVE                              ⑩ REFER or REJECT
-           │                                          │
-           ▼                                          ▼
-┌──────────────────────┐              ┌───────────────────────────┐
-│  ONBOARDING CHANNEL  │              │     HUMAN REVIEWER        │
-│  Proceeds with       │              │  KYB Analyst reviews case │
-│  onboarding journey  │              │  Takes manual decision    │
-└──────────────────────┘              │  Approves / Rejects       │
-                                      └───────────────────────────┘
+```mermaid
+flowchart TD
+    A([KYB Request Received]) --> B
+
+    B["🧠 REASON\nWhat do I know?\nWhat do I need next?"]
+    B --> C["⚙️ ACT\nCall a KYB tool via MCP"]
+    C --> D["👁️ OBSERVE\nRead the tool result"]
+    D --> E{Enough to decide?}
+
+    E -->|No — need more data| B
+    E -->|Early exit condition met| F
+    E -->|All checks complete| G
+
+    F["⚠️ EARLY EXIT\nExamples:\n• Business dissolved → REJECT now\n• Sanctions hit found → REJECT now\n• Critical data missing → REFER now"]
+
+    G["✅ FINAL DECISION\nCall decision engine\nAPPROVE / REFER / REJECT"]
+
+    F --> H
+    G --> H
+
+    H{Requires human review?}
+    H -->|APPROVE| I([Onboarding proceeds])
+    H -->|REFER| J([Route to KYB Analyst])
+    H -->|REJECT| K([Application declined])
+
+    style B fill:#ede9fe,stroke:#7c3aed
+    style C fill:#dcfce7,stroke:#16a34a
+    style D fill:#dbeafe,stroke:#3b82f6
+    style F fill:#fee2e2,stroke:#dc2626
+    style G fill:#bbf7d0,stroke:#16a34a
+    style I fill:#bbf7d0,stroke:#16a34a
+    style J fill:#ffedd5,stroke:#ea580c
+    style K fill:#fee2e2,stroke:#dc2626
 ```
 
 ---
 
-## Step-by-Step Flow
+## Pipeline vs Agentic — Key Difference
 
-| Step | Who | What Happens |
-|------|-----|-------------|
-| ① | Business Customer | Fills in registration number on Digital Onboarding Channel |
-| ② | Onboarding Channel | Sends POST /kyb/check to KYB API Gateway |
-| ③ | KYB API Gateway | Authenticates request, triggers KYB Agent |
-| ④ | KYB Agent | Calls `run_full_kyb` on MCP Server |
-| ⑤ | MCP Server | Calls Companies House — verifies business status and details |
-| ⑥ | MCP Server | Calls Companies House — retrieves directors and PSC/UBO |
-| ⑦ | MCP Server | Screens business and directors against sanctions lists |
-| ⑧ | MCP Server | Calculates risk score from all gathered data |
-| ⑨ | MCP Server | Decision engine produces APPROVE / REFER / REJECT + next actions |
-| ⑩ | KYB Agent | Returns structured decision back to API Gateway |
-| ⑪ | API Gateway | Returns result to Onboarding Channel |
-| ⑫a | Onboarding Channel | If APPROVE → continues onboarding journey |
-| ⑫b | Onboarding Channel | If REFER/REJECT → notifies customer, routes case to KYB Analyst |
-| ⑬ | Human Reviewer | Reviews REFER/REJECT cases, takes final decision |
+| | Pipeline Model (Before) | Agentic Model (Now) |
+|--|--------------------------|----------------------|
+| **Tool execution** | Fixed sequence, always all tools | Agent decides what to call and when |
+| **Early exit** | No — always runs all steps | Yes — stops as soon as decision is clear |
+| **Reasoning** | None — deterministic | Yes — reasons after every tool result |
+| **Flexibility** | Rigid | Adapts based on intermediate results |
+| **Example** | Dissolved company still runs sanctions check | Dissolved company → REJECT immediately, no further checks |
 
 ---
 
